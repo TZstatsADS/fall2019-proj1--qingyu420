@@ -1,0 +1,277 @@
+---
+title: "Project 1"
+output: html_notebook
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#Install
+install.packages("wordcloud")
+
+#Load
+library("tm")
+library("SnowballC")
+library("wordcloud")
+library("RColorBrewer")
+library("data.table")
+library("tidytext")
+library("tidyverse")
+library("DT")
+```
+
+Clean Data
+### Step 2 - Preliminary cleaning of text
+
+We clean the text by converting all the letters to the lower case, and removing punctuation, numbers, empty words and extra white space.
+
+```{r text processing in tm}
+# function for removimg leading and trailing whitespace from character strings 
+leadingWhitespace <- content_transformer(function(x) str_trim(x, side = "both"))
+# remove stop words
+data("stop_words")
+word <- c("lot", "today", "months", "month", "wanna", "wouldnt", "wasnt", "ha", "na", "ooh", "da",
+        "gonna", "im", "dont", "aint", "wont", "yeah", "la", "oi", "nigga", "fuck",
+          "hey", "year", "years", "last", "past", "feel")
+stop_words <- c(stop_words$word, word)
+# clean the data and make a corpus
+corpus <- VCorpus(VectorSource(dt_lyrics$lyrics))%>%
+  tm_map(content_transformer(tolower))%>%
+  tm_map(removePunctuation)%>%
+  tm_map(removeWords, character(0))%>%
+  tm_map(removeWords, stop_words)%>%
+  tm_map(removeNumbers)%>%
+  tm_map(stripWhitespace)%>%
+  tm_map(leadingWhitespace)
+```
+
+
+### Step 3 - Stemming words and converting tm object to tidy object
+
+Stemming reduces a word to its word *stem*. We stem the words here and then convert the "tm" object to a "tidy" object for much faster processing.
+
+```{r stemming}
+stemmed <- tm_map(corpus, stemDocument) %>%
+  tidy() %>%
+  select(text)
+```
+
+### Step 4 - Creating tidy format of the dictionary to be used for completing stems
+
+We also need a dictionary to look up the words corresponding to the stems.
+
+```{r tidy dictionary}
+dict <- tidy(corpus) %>%
+  select(text) %>%
+  unnest_tokens(dictionary, text)
+```
+
+### Step 5 - Combining stems and dictionary into the same tibble
+
+Here we combine the stems and the dictionary into the same "tidy" object.
+
+```{r tidy stems with dictionary}
+completed <- stemmed %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(stems, text) %>%
+  bind_cols(dict) 
+```
+
+### Step 6 - Stem completion
+
+Lastly, we complete the stems by picking the corresponding word with the highest frequency.
+
+```{r stem completion, warning=FALSE, message=FALSE}
+completed <- completed %>%
+  group_by(stems) %>%
+  count(dictionary) %>%
+  mutate(word = dictionary[which.max(n)]) %>%
+  ungroup() %>%
+  select(stems, word) %>%
+  distinct() %>%
+  right_join(completed) %>%
+  select(-stems)
+```
+
+### Step 8 - Pasting stem completed individual words into their respective lyrics
+
+We want our processed words to resemble the structure of the original lyrics. So we paste the words together to form processed lyrics.
+
+```{r reverse unnest}
+completed <- completed %>%
+  group_by(id) %>%
+  summarise(stemmedwords= str_c(word, collapse = " ")) %>%
+  ungroup()
+```
+
+### Step 9 - Keeping a track of the processed lyrics with their own ID
+
+```{r cleaned hm_data, warning=FALSE, message=FALSE}
+dt_lyrics <- dt_lyrics %>%
+  mutate(id = row_number()) %>%
+  inner_join(completed)
+```
+
+### Exporting the processed text data into a CSV file
+
+```{r export data}
+save(dt_lyrics, file="../output/processed_lyrics.RData")
+load("../output/processed_lyrics.RData")
+```
+
+
+Analayze the data
+
+Hip-Hop Wordcloud
+```{r}
+hiphop <- dt_lyrics[dt_lyrics$genre=="Hip-Hop",]
+
+# clean the data and make a corpus
+corpus <- VCorpus(VectorSource(hiphop$stemmedwords))
+
+tdm <- TermDocumentMatrix(corpus)
+m <- as.matrix(tdm)
+v <- sort(rowSums(m),decreasing=TRUE)
+d <- data.frame(word = names(v),freq=v)
+
+wordcloud(d$word,d$freq,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"))
+```
+
+Non Hip Hop wordcloud
+```{r,warning=FALSE}
+others <- dt_lyrics[dt_lyrics$genre!="Hip-Hop",]
+corpus_others <- VCorpus(VectorSource(others$stemmedwords))
+word_tibble <- tidy(corpus_others) %>%
+  select(text) %>%
+  mutate(id = row_number()) %>%
+  unnest_tokens(word, text)
+
+d_others <-count(filter(word_tibble, id %in% which(dt_lyrics$genre != "Hip-Hop")), word, sort = TRUE) 
+wordcloud(d_others$word,d_others$n,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"),max.words = 200)
+```
+
+Comparision between HipHop music and others
+```{r}
+d$class <- "HipHop"
+d_others$class <- "Others"
+d$prop <- round((d$freq/sum(d$freq))*10000,0)
+d_others$prop <- round((d_others$n/sum(d_others$n))*10000,0)
+
+word_list <- d[1:200,]$word
+c <- rep(0,length(word_list))
+for(i in 1:length(word_list)){
+  c[i] <- d_others[d_others$word==word_list[i],]$prop
+}
+new_table <- data.frame(word_list, d[1:length(word_list),]$prop)
+new_table$others_prop <- c
+colnames(new_table) <- c("Word","Hiphop_prop","Others_prop")
+new_table$ratio <- round(new_table$Hiphop_prop/new_table$Others_prop,2)
+new_table[46,]$ratio =20
+new_table[56,]$ratio =19
+new_table[84,]$ratio =15
+new_table[115,]$ratio =13
+new_table[129,]$ratio =12
+new_table[155,]$ratio =10
+new_table[194,]$ratio =9
+new_table[198,]$ratio =8
+sort_table<-new_table[order(new_table$ratio,decreasing = TRUE),]
+ggplot(data=new_table,aes(x=Hiphop_prop,y=Others_prop,color=ratio, label=Word)) +
+  geom_point()+
+  geom_text(aes(label=ifelse(Hiphop_prop>30,as.character(Word),'')),hjust=0.5,vjust=1.2)+
+  labs(x="Hip-Hop",y="Others",title="Most Hip Hop (every 10000 words)")
+
+xx<-barplot(sort_table[1:10,4],names.arg=c("niggas","yall","bitch","nigaz","rap","hoes","thug","fucker","shit","gon"),col="lightblue",ylim=c(0,70))
+text(x=xx,y=sort_table[1:10,4],label=sort_table[1:10,4],pos=3)
+```
+
+Different Ages
+```{r,warning=FALSE}
+hiphop90 <- hiphop[hiphop$year>=1990 & hiphop$year <= 1999,]
+hiphop80 <- hiphop[hiphop$year>=1980 & hiphop$year <= 1989,]
+hiphop00 <- hiphop[hiphop$year>=2000 & hiphop$year <= 2009,]
+hiphop10 <- hiphop[hiphop$year>=2010 & hiphop$year <= 2019,]
+
+#80s
+corpus_80s <- VCorpus(VectorSource(hiphop80$stemmedwords))
+
+tdm_80s <- TermDocumentMatrix(corpus_80s)
+m_80s <- as.matrix(tdm_80s)
+v_80s <- sort(rowSums(m_80s),decreasing=TRUE)
+d_80s <- data.frame(word = names(v_80s),freq=v_80s)
+
+wordcloud(d_80s$word,d_80s$freq,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"))
+
+#90s
+corpus_90s <- VCorpus(VectorSource(hiphop90$stemmedwords))
+
+tdm_90s <- TermDocumentMatrix(corpus_90s)
+m_90s <- as.matrix(tdm_90s)
+v_90s <- sort(rowSums(m_90s),decreasing=TRUE)
+d_90s <- data.frame(word = names(v_90s),freq=v_90s)
+
+wordcloud(d_90s$word,d_90s$freq,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"))
+
+#00s
+corpus_00s <- VCorpus(VectorSource(hiphop00$stemmedwords))
+
+tdm_00s <- TermDocumentMatrix(corpus_00s)
+m_00s <- as.matrix(tdm_00s)
+v_00s <- sort(rowSums(m_00s),decreasing=TRUE)
+d_00s <- data.frame(word = names(v_00s),freq=v_00s)
+
+wordcloud(d_00s$word,d_00s$freq,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"))
+
+#10s
+corpus_10s <- VCorpus(VectorSource(hiphop10$stemmedwords))
+
+tdm_10s <- TermDocumentMatrix(corpus_10s)
+m_10s <- as.matrix(tdm_10s)
+v_10s <- sort(rowSums(m_10s),decreasing=TRUE)
+d_10s <- data.frame(word = names(v_10s),freq=v_10s)
+
+wordcloud(d_10s$word,d_10s$freq,random.order = FALSE, rot.per = 0.3, scale=c(4,.5),colors=brewer.pal(8,"Dark2"))
+
+ggplot(data=d_80s[1:20,], aes(x=word,y=freq,group=1))+
+  geom_line(linetype="dashed")+
+  geom_point()+
+  labs(title = "Top 20 Common Words under 80s")
+
+ggplot(data=d_90s[1:20,], aes(x=word,y=freq,group=1))+
+  geom_line(linetype="dashed")+
+  geom_point()+
+  labs(title = "Top 20 Common Words under 90s")
+
+ggplot(data=d_00s[1:20,], aes(x=word,y=freq,group=1))+
+  geom_line(linetype="dashed")+
+  geom_point()+
+  labs(title = "Top 20 Common Words under 00s")
+
+ggplot(data=d_10s[1:20,], aes(x=word,y=freq,group=1))+
+  geom_line(linetype="dashed")+
+  geom_point()+
+  labs(title = "Top 20 Common Words under 10s")
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
